@@ -1,0 +1,4646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Reach the Ring</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #171a21; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #game { background: #F5ECDB; border-radius: 14px; box-shadow: 0 10px 40px rgba(0,0,0,.5); touch-action: none; cursor: pointer; -webkit-user-select: none; user-select: none; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+(() => {
+'use strict';
+const W = 390, H = 690;
+const R = 14;
+const V_TOL = (R * 2) / 16;
+const G = 1800, MIN_A = 40, MAX_A = 240, CHARGE_TIME = 1.5;
+const WALL_L = 26, WALL_R = W - 26;
+const DYN_SEQ = ['red', 'blue', 'yellow'];
+const DYN_PERIOD = 1.5;
+
+// ---------- Web Audio feedback sounds ----------
+let audioCtx = null;
+let osc = null, oscGain = null, chargePlaying = false;
+const AUDIO_ON = true;
+function ensureAudio() {
+  if (!AUDIO_ON) return false;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return true;
+  } catch (e) { return false; }
+}
+function startCharge() {
+  if (!ensureAudio()) return;
+  stopCharge();
+  osc = audioCtx.createOscillator();
+  oscGain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = 200;
+  oscGain.gain.value = 0.0;
+  oscGain.gain.linearRampToValueAtTime(0.18, audioCtx.currentTime + 0.08);
+  osc.connect(oscGain).connect(audioCtx.destination);
+  osc.start();
+  chargePlaying = true;
+}
+function setChargePitch(p) {
+  if (!chargePlaying || !osc) return;
+  const f = 200 + (600 - 200) * p;
+  osc.frequency.setTargetAtTime(f, audioCtx.currentTime, 0.03);
+  oscGain.gain.setTargetAtTime(0.18 + 0.06 * p, audioCtx.currentTime, 0.03);
+}
+function stopCharge() {
+  if (!chargePlaying) return;
+  const t = audioCtx.currentTime;
+  try {
+    oscGain.gain.cancelScheduledValues(t);
+    oscGain.gain.setTargetAtTime(0, t, 0.03);
+    osc.stop(t + 0.1);
+  } catch (e) {}
+  osc = null; oscGain = null; chargePlaying = false;
+}
+function blip(freq, dur, vol) {
+  if (!ensureAudio()) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(freq, t);
+  o.frequency.exponentialRampToValueAtTime(freq * 1.15, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audioCtx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function playLaunch() { blip(520, 0.12, 0.22); }
+function playHit() { blip(620, 0.16, 0.22); }
+function playMiss() { blip(240, 0.16, 0.18); }
+function playHurt() { blip(160, 0.22, 0.20); }
+function playWin() { blip(760, 0.28, 0.22); }
+function playSafe() { blip(880, 0.20, 0.20); }
+
+const PALETTE = {
+  red: { dark: '#d94040', light: '#f6d9d9' },
+  blue: { dark: '#2f6bd8', light: '#d5e2f8' },
+  yellow: { dark: '#e8b322', light: '#faedcb' },
+  green: { dark: '#2fa36b', light: '#d3efe1' },
+};
+const LEVELS = [
+  // 第1关
+  {
+    "color": "blue",
+    "stages": [
+      {
+        "goal": "jump",
+        "bands": [],
+        "text": "按压屏幕让小球跳起"
+      },
+      {
+        "goal": "land",
+        "bands": [
+          {
+            "bottom": 100,
+            "top": 156,
+            "color": "blue"
+          }
+        ],
+        "text": "很好！这次让小球跳到条带内部"
+      },
+      {
+        "goal": "land",
+        "bands": [
+          {
+            "bottom": 70,
+            "top": 126,
+            "color": "red"
+          },
+          {
+            "bottom": 140,
+            "top": 196,
+            "color": "blue"
+          }
+        ],
+        "text": "只有相同颜色的条带才能匹配！"
+      }
+    ]
+  },
+  // 第2关
+  {
+    "color": "blue",
+    "layers": 3,
+    "bands": [
+      {
+        "bottom": 90,
+        "top": 160,
+        "color": "blue"
+      },
+      {
+        "bottom": 192,
+        "top": 262,
+        "color": "red"
+      },
+      {
+        "bottom": 294,
+        "top": 364,
+        "color": "blue"
+      },
+      {
+        "bottom": 396,
+        "top": 466,
+        "color": "red"
+      },
+      {
+        "bottom": 500,
+        "top": 570,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第3关
+  {
+    "color": "blue",
+    "layers": 5,
+    "bands": [
+      {
+        "bottom": 107,
+        "top": 174,
+        "color": "blue"
+      },
+      {
+        "bottom": 221,
+        "top": 249,
+        "color": "red"
+      },
+      {
+        "bottom": 290,
+        "top": 338,
+        "color": "blue"
+      },
+      {
+        "bottom": 385,
+        "top": 413,
+        "color": "red"
+      },
+      {
+        "bottom": 465,
+        "top": 532,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第4关
+  {
+    "color": "red",
+    "layers": 6,
+    "bands": [
+      {
+        "bottom": 69,
+        "top": 136,
+        "color": "red"
+      },
+      {
+        "bottom": 186,
+        "top": 208,
+        "color": "blue"
+      },
+      {
+        "bottom": 250,
+        "top": 306,
+        "color": "red"
+      },
+      {
+        "bottom": 346,
+        "top": 368,
+        "color": "yellow"
+      },
+      {
+        "bottom": 414,
+        "top": 459,
+        "color": "red"
+      }
+    ]
+  },
+  // 第5关
+  {
+    "color": "blue",
+    "layers": 7,
+    "bands": [
+      {
+        "bottom": 82,
+        "top": 149,
+        "color": "blue"
+      },
+      {
+        "bottom": 192,
+        "top": 231,
+        "color": "red"
+      },
+      {
+        "bottom": 250,
+        "top": 289,
+        "color": "yellow"
+      },
+      {
+        "bottom": 333,
+        "top": 389,
+        "color": "blue"
+      },
+      {
+        "bottom": 562,
+        "top": 610,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第6关
+  {
+    "color": "red",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 92,
+        "top": 162,
+        "color": "red"
+      },
+      {
+        "bottom": 253,
+        "top": 287,
+        "color": "red"
+      },
+      {
+        "bottom": 324,
+        "top": 416,
+        "color": "red"
+      },
+      {
+        "bottom": 487,
+        "top": 526,
+        "color": "green"
+      },
+      {
+        "bottom": 535,
+        "top": 574,
+        "color": "blue"
+      },
+      {
+        "bottom": 597,
+        "top": 645,
+        "color": "red"
+      },
+      {
+        "bottom": 733,
+        "top": 767,
+        "color": "red"
+      },
+      {
+        "bottom": 835,
+        "top": 905,
+        "color": "red"
+      }
+    ]
+  },
+  // 第7关
+  {
+    "color": "yellow",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 204,
+        "top": 288,
+        "color": "yellow"
+      },
+      {
+        "bottom": 338,
+        "top": 511,
+        "color": "green"
+      },
+      {
+        "bottom": 511,
+        "top": 595,
+        "color": "yellow"
+      },
+      {
+        "bottom": 666,
+        "top": 736,
+        "color": "red"
+      },
+      {
+        "bottom": 731,
+        "top": 830,
+        "color": "blue"
+      },
+      {
+        "bottom": 830,
+        "top": 914,
+        "color": "yellow"
+      }
+    ]
+  },
+  // 第8关
+  {
+    "color": "green",
+    "layers": 9,
+    "bands": [
+      {
+        "bottom": 94,
+        "top": 374,
+        "color": "green"
+      },
+      {
+        "bottom": 445,
+        "top": 486,
+        "color": "blue"
+      },
+      {
+        "bottom": 643,
+        "top": 685,
+        "color": "yellow"
+      },
+      {
+        "bottom": 540,
+        "top": 596,
+        "color": "green"
+      },
+      {
+        "bottom": 744,
+        "top": 786,
+        "color": "green"
+      },
+      {
+        "bottom": 866,
+        "top": 914,
+        "color": "red"
+      },
+      {
+        "bottom": 980,
+        "top": 1028,
+        "color": "green"
+      }
+    ]
+  },
+  // 第9关
+  {
+    "color": "blue",
+    "layers": 10,
+    "bands": [
+      {
+        "bottom": 100,
+        "top": 156,
+        "color": "blue"
+      },
+      {
+        "bottom": 266,
+        "top": 314,
+        "color": "blue"
+      },
+      {
+        "bottom": 336,
+        "top": 370,
+        "color": "blue"
+      },
+      {
+        "bottom": 507,
+        "top": 1239,
+        "color": "blue"
+      },
+      {
+        "bottom": 1330,
+        "top": 1386,
+        "color": "blue"
+      },
+      {
+        "bottom": 1434,
+        "top": 1454,
+        "color": "green"
+      },
+      {
+        "bottom": 1453,
+        "top": 1473,
+        "color": "red"
+      },
+      {
+        "bottom": 1473,
+        "top": 1493,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1519,
+        "top": 1559,
+        "color": "blue"
+      },
+      {
+        "bottom": 1609,
+        "top": 1637,
+        "color": "blue"
+      },
+      {
+        "bottom": 1693,
+        "top": 1735,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第10关
+  {
+    "color": "red",
+    "layers": 12,
+    "bands": [
+      {
+        "bottom": 137,
+        "top": 179,
+        "color": "red"
+      },
+      {
+        "bottom": 216,
+        "top": 261,
+        "color": "blue"
+      },
+      {
+        "bottom": 302,
+        "top": 358,
+        "color": "red"
+      },
+      {
+        "bottom": 395,
+        "top": 437,
+        "color": "red"
+      },
+      {
+        "bottom": 480,
+        "top": 598,
+        "color": "green"
+      },
+      {
+        "bottom": 632,
+        "top": 1087,
+        "color": "red"
+      },
+      {
+        "bottom": 1160,
+        "top": 1216,
+        "color": "red"
+      },
+      {
+        "bottom": 1245,
+        "top": 1298,
+        "color": "blue"
+      },
+      {
+        "bottom": 1318,
+        "top": 1368,
+        "color": "green"
+      },
+      {
+        "bottom": 1391,
+        "top": 1433,
+        "color": "red"
+      },
+      {
+        "bottom": 1465,
+        "top": 1513,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1535,
+        "top": 1634,
+        "color": "red"
+      },
+      {
+        "bottom": 1691,
+        "top": 1739,
+        "color": "red"
+      },
+      {
+        "bottom": 1786,
+        "top": 1842,
+        "color": "red"
+      },
+      {
+        "bottom": 1879,
+        "top": 1899,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1921,
+        "top": 1941,
+        "color": "green"
+      },
+      {
+        "bottom": 1962,
+        "top": 1982,
+        "color": "blue"
+      },
+      {
+        "bottom": 2023,
+        "top": 2065,
+        "color": "red"
+      },
+      {
+        "bottom": 2156,
+        "top": 2192,
+        "color": "red"
+      }
+    ]
+  },
+  // 第11关
+  {
+    "color": "blue",
+    "layers": 4,
+    "dynSeq": [
+      "blue",
+      "red"
+    ],
+    "dynPeriod": 2.5,
+    "hint": "动态条带会循环变色，把握起跳时机，让最高点正逢颜色与小球一致",
+    "bands": [
+      {
+        "bottom": 90,
+        "top": 160,
+        "dynamic": true
+      },
+      {
+        "bottom": 221,
+        "top": 291,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第12关
+  {
+    "color": "red",
+    "layers": 5,
+    "dynSeq": [
+      "red",
+      "blue"
+    ],
+    "dynPeriod": 2,
+    "bands": [
+      {
+        "bottom": 90,
+        "top": 157,
+        "dynamic": true
+      },
+      {
+        "bottom": 197,
+        "top": 264,
+        "color": "blue"
+      },
+      {
+        "bottom": 304,
+        "top": 371,
+        "dynamic": true
+      },
+      {
+        "bottom": 411,
+        "top": 478,
+        "color": "blue"
+      },
+      {
+        "bottom": 518,
+        "top": 585,
+        "dynamic": true
+      },
+      {
+        "bottom": 625,
+        "top": 692,
+        "color": "blue"
+      },
+      {
+        "bottom": 732,
+        "top": 799,
+        "dynamic": true
+      },
+      {
+        "bottom": 839,
+        "top": 906,
+        "color": "blue"
+      },
+      {
+        "bottom": 946,
+        "top": 1013,
+        "color": "red"
+      }
+    ]
+  },
+  // 第13关
+  {
+    "color": "blue",
+    "layers": 6,
+    "dynSeq": [
+      "blue",
+      "red",
+      "yellow"
+    ],
+    "dynPeriod": 1.8,
+    "bands": [
+      {
+        "bottom": 90,
+        "top": 152,
+        "color": "blue"
+      },
+      {
+        "bottom": 207,
+        "top": 249,
+        "color": "red"
+      },
+      {
+        "bottom": 299,
+        "top": 361,
+        "dynamic": true
+      },
+      {
+        "bottom": 413,
+        "top": 455,
+        "color": "yellow"
+      },
+      {
+        "bottom": 508,
+        "top": 570,
+        "dynamic": true
+      },
+      {
+        "bottom": 636,
+        "top": 686,
+        "color": "blue"
+      },
+      {
+        "bottom": 720,
+        "top": 782,
+        "color": "red"
+      },
+      {
+        "bottom": 806,
+        "top": 854,
+        "dynamic": true
+      },
+      {
+        "bottom": 926,
+        "top": 982,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第14关
+  {
+    "color": "yellow",
+    "layers": 7,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 86,
+        "top": 128,
+        "color": "red"
+      },
+      {
+        "bottom": 139,
+        "top": 181,
+        "color": "blue"
+      },
+      {
+        "bottom": 210,
+        "top": 329,
+        "dynamic": true
+      },
+      {
+        "bottom": 399,
+        "top": 461,
+        "color": "red"
+      },
+      {
+        "bottom": 496,
+        "top": 552,
+        "dynamic": true
+      },
+      {
+        "bottom": 624,
+        "top": 680,
+        "dynamic": true
+      },
+      {
+        "bottom": 736,
+        "top": 778,
+        "color": "yellow"
+      },
+      {
+        "bottom": 805,
+        "top": 873,
+        "color": "yellow"
+      }
+    ]
+  },
+  // 第15关
+  {
+    "color": "green",
+    "layers": 8,
+    "dynSeq": [
+      "blue",
+      "red",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.2,
+    "bands": [
+      {
+        "bottom": 100,
+        "top": 162,
+        "dynamic": true
+      },
+      {
+        "bottom": 235,
+        "top": 291,
+        "dynamic": true
+      },
+      {
+        "bottom": 339,
+        "top": 389,
+        "dynamic": true
+      },
+      {
+        "bottom": 429,
+        "top": 474,
+        "dynamic": true
+      },
+      {
+        "bottom": 529,
+        "top": 579,
+        "color": "blue"
+      },
+      {
+        "bottom": 625,
+        "top": 681,
+        "color": "green"
+      },
+      {
+        "bottom": 733,
+        "top": 789,
+        "dynamic": true
+      },
+      {
+        "bottom": 831,
+        "top": 870,
+        "color": "green"
+      }
+    ]
+  },
+  // 第16关
+  {
+    "color": "blue",
+    "layers": 5,
+    "bands": [
+      {
+        "bottom": 90,
+        "top": 160,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 231,
+        "top": 301,
+        "color": "red"
+      }
+    ]
+  },
+  // 第17关
+  {
+    "color": "red",
+    "layers": 6,
+    "bands": [
+      {
+        "bottom": 90,
+        "top": 146,
+        "color": "red"
+      },
+      {
+        "bottom": 186,
+        "top": 242,
+        "color": "blue"
+      },
+      {
+        "bottom": 292,
+        "top": 348,
+        "color": "red"
+      },
+      {
+        "bottom": 388,
+        "top": 444,
+        "color": "yellow"
+      },
+      {
+        "bottom": 494,
+        "top": 550,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 630,
+        "top": 686,
+        "color": "blue",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 748,
+        "top": 804,
+        "color": "red"
+      },
+      {
+        "bottom": 858,
+        "top": 914,
+        "color": "yellow"
+      }
+    ]
+  },
+  // 第18关
+  {
+    "color": "blue",
+    "layers": 7,
+    "bands": [
+      {
+        "bottom": 113,
+        "top": 169,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 241,
+        "top": 297,
+        "color": "red",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 369,
+        "top": 425,
+        "color": "yellow",
+        "morph": true,
+        "target": "green"
+      },
+      {
+        "bottom": 504,
+        "top": 560,
+        "color": "green",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 633,
+        "top": 689,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第19关
+  {
+    "color": "yellow",
+    "layers": 7,
+    "bands": [
+      {
+        "bottom": 73,
+        "top": 123,
+        "color": "yellow",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 174,
+        "top": 224,
+        "color": "yellow",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 278,
+        "top": 423,
+        "color": "blue"
+      },
+      {
+        "bottom": 476,
+        "top": 526,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 581,
+        "top": 631,
+        "color": "blue",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 687,
+        "top": 830,
+        "color": "red"
+      },
+      {
+        "bottom": 886,
+        "top": 936,
+        "color": "red",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 985,
+        "top": 1033,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 1084,
+        "top": 1171,
+        "color": "yellow"
+      }
+    ]
+  },
+  // 第20关
+  {
+    "color": "green",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 82,
+        "top": 138,
+        "color": "green",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 185,
+        "top": 435,
+        "color": "green"
+      },
+      {
+        "bottom": 492,
+        "top": 537,
+        "color": "green",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 585,
+        "top": 630,
+        "color": "green",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 676,
+        "top": 724,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 767,
+        "top": 815,
+        "color": "yellow",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 885,
+        "top": 960,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第21关
+  {
+    "color": "blue",
+    "layers": 8,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.8,
+    "bands": [
+      {
+        "bottom": 133,
+        "top": 203,
+        "rainbow": true
+      },
+      {
+        "bottom": 286,
+        "top": 356,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 440,
+        "top": 510,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第22关
+  {
+    "color": "red",
+    "layers": 9,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.8,
+    "bands": [
+      {
+        "bottom": 120,
+        "top": 176,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 233,
+        "top": 289,
+        "rainbow": true
+      },
+      {
+        "bottom": 348,
+        "top": 404,
+        "color": "blue"
+      },
+      {
+        "bottom": 458,
+        "top": 514,
+        "rainbow": true
+      },
+      {
+        "bottom": 565,
+        "top": 610,
+        "color": "blue"
+      },
+      {
+        "bottom": 651,
+        "top": 696,
+        "color": "red"
+      },
+      {
+        "bottom": 786,
+        "top": 828,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第23关
+  {
+    "color": "yellow",
+    "layers": 10,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 168,
+        "top": 224,
+        "rainbow": true
+      },
+      {
+        "bottom": 80,
+        "top": 119,
+        "color": "yellow",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 284,
+        "top": 323,
+        "color": "yellow",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 376,
+        "top": 432,
+        "rainbow": true
+      },
+      {
+        "bottom": 490,
+        "top": 552,
+        "dynamic": true
+      }
+    ]
+  },
+  // 第24关
+  {
+    "color": "green",
+    "layers": 10,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.2,
+    "bands": [
+      {
+        "bottom": 81,
+        "top": 126,
+        "color": "green",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 165,
+        "top": 254,
+        "rainbow": true
+      },
+      {
+        "bottom": 295,
+        "top": 360,
+        "color": "red"
+      },
+      {
+        "bottom": 391,
+        "top": 910,
+        "color": "green"
+      },
+      {
+        "bottom": 963,
+        "top": 1025,
+        "color": "red",
+        "morph": true,
+        "target": "green"
+      },
+      {
+        "bottom": 1072,
+        "top": 1168,
+        "dynamic": true
+      },
+      {
+        "bottom": 1212,
+        "top": 1273,
+        "color": "green",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 1318,
+        "top": 1386,
+        "dynamic": true
+      },
+      {
+        "bottom": 1435,
+        "top": 1782,
+        "color": "green"
+      },
+      {
+        "bottom": 1852,
+        "top": 1908,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第25关
+  {
+    "color": "red",
+    "layers": 11,
+    "dynSeq": [
+      "blue",
+      "red",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 83,
+        "top": 139,
+        "color": "yellow"
+      },
+      {
+        "bottom": 159,
+        "top": 215,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 346,
+        "top": 391,
+        "color": "blue"
+      },
+      {
+        "bottom": 467,
+        "top": 510,
+        "dynamic": true
+      },
+      {
+        "bottom": 555,
+        "top": 594,
+        "rainbow": true
+      },
+      {
+        "bottom": 649,
+        "top": 697,
+        "color": "blue",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 744,
+        "top": 792,
+        "color": "blue",
+        "morph": true,
+        "target": "green"
+      },
+      {
+        "bottom": 847,
+        "top": 889,
+        "color": "green"
+      },
+      {
+        "bottom": 943,
+        "top": 1303,
+        "dynamic": true
+      },
+      {
+        "bottom": 1361,
+        "top": 1411,
+        "color": "green",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 1456,
+        "top": 1512,
+        "dynamic": true
+      },
+      {
+        "bottom": 1562,
+        "top": 1610,
+        "rainbow": true
+      },
+      {
+        "bottom": 1661,
+        "top": 1703,
+        "color": "green"
+      },
+      {
+        "bottom": 1739,
+        "top": 1781,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1817,
+        "top": 1859,
+        "color": "green"
+      }
+    ]
+  },
+  // 第26关
+  {
+    "color": "blue",
+    "layers": 5,
+    "hint": "通过滑动条来改变小球水平位置",
+    "bands": [
+      {
+        "bottom": 114,
+        "top": 184,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 265,
+        "top": 335,
+        "color": "red"
+      }
+    ]
+  },
+  // 第27关
+  {
+    "color": "red",
+    "layers": 6,
+    "bands": [
+      {
+        "bottom": 99,
+        "top": 155,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5,
+            "target": "red"
+          },
+          {
+            "color": "blue",
+            "to": 1,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 221,
+        "top": 277,
+        "color": "blue"
+      },
+      {
+        "bottom": 343,
+        "top": 399,
+        "segments": [
+          {
+            "to": 0.5,
+            "color": "blue",
+            "target": "blue"
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 465,
+        "top": 521,
+        "color": "red"
+      },
+      {
+        "bottom": 591,
+        "top": 647,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 1,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 713,
+        "top": 769,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5,
+            "target": "blue"
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 829,
+        "top": 885,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第28关
+  {
+    "color": "blue",
+    "layers": 7,
+    "bands": [
+      {
+        "bottom": 107,
+        "top": 163,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "red",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "yellow",
+            "to": 1,
+            "target": "yellow"
+          }
+        ]
+      },
+      {
+        "bottom": 212,
+        "top": 243,
+        "color": "yellow"
+      },
+      {
+        "bottom": 288,
+        "top": 396,
+        "color": "red"
+      },
+      {
+        "bottom": 460,
+        "top": 516,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.3333333333333333,
+            "target": "yellow"
+          },
+          {
+            "color": "red",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "blue",
+            "to": 1,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 582,
+        "top": 683,
+        "color": "yellow"
+      },
+      {
+        "bottom": 737,
+        "top": 787,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第29关
+  {
+    "color": "yellow",
+    "layers": 7,
+    "bands": [
+      {
+        "bottom": 130,
+        "top": 186,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "yellow",
+            "to": 0.6666666666666666,
+            "target": "yellow"
+          },
+          {
+            "color": "blue",
+            "to": 1,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 243,
+        "top": 299,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "blue",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 352,
+        "top": 408,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "blue",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 513,
+        "top": 583,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 665,
+        "top": 721,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "red",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      }
+    ]
+  },
+  // 第30关
+  {
+    "color": "blue",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 108,
+        "top": 164,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 239,
+        "top": 295,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "red",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 365,
+        "top": 422,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.25
+          },
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "yellow",
+            "to": 0.75
+          },
+          {
+            "color": "green",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 481,
+        "top": 520,
+        "color": "blue"
+      },
+      {
+        "bottom": 570,
+        "top": 609,
+        "color": "yellow"
+      },
+      {
+        "bottom": 661,
+        "top": 717,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 791,
+        "top": 847,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "yellow",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 937,
+        "top": 1224,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1312,
+        "top": 1368,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.25
+          },
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "green",
+            "to": 0.75
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1476,
+        "top": 1518,
+        "color": "red"
+      }
+    ]
+  },
+  // 第31关
+  {
+    "color": "red",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 147,
+        "top": 209,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 273,
+        "top": 323,
+        "rainbow": true
+      },
+      {
+        "bottom": 491,
+        "top": 716,
+        "color": "red"
+      },
+      {
+        "bottom": 816,
+        "top": 872,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 959,
+        "top": 1015,
+        "dynamic": true
+      },
+      {
+        "bottom": 1180,
+        "top": 1529,
+        "color": "blue"
+      },
+      {
+        "bottom": 1624,
+        "top": 1686,
+        "rainbow": true
+      }
+    ],
+    "dynSeq": [
+      "red",
+      "blue"
+    ]
+  },
+  // 第32关
+  {
+    "color": "blue",
+    "layers": 9,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 130,
+        "top": 186,
+        "color": "blue"
+      },
+      {
+        "bottom": 336,
+        "top": 398,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "red",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 472,
+        "top": 528,
+        "color": "red",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 590,
+        "top": 652,
+        "dynamic": true
+      },
+      {
+        "bottom": 816,
+        "top": 1037,
+        "color": "red"
+      },
+      {
+        "bottom": 1152,
+        "top": 1224,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "yellow",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1301,
+        "top": 1341,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1404,
+        "top": 1466,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第33关
+  {
+    "color": "yellow",
+    "layers": 9,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.3,
+    "bands": [
+      {
+        "bottom": 191,
+        "top": 253,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "blue",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 352,
+        "top": 394,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 480,
+        "top": 536,
+        "color": "red"
+      },
+      {
+        "bottom": 622,
+        "top": 678,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.25
+          },
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "red",
+            "to": 0.75
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 763,
+        "top": 797,
+        "color": "yellow"
+      },
+      {
+        "bottom": 875,
+        "top": 962,
+        "dynamic": true
+      }
+    ]
+  },
+  // 第34关
+  {
+    "color": "blue",
+    "layers": 10,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 117,
+        "top": 173,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 240,
+        "top": 296,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 381,
+        "top": 744,
+        "color": "red"
+      },
+      {
+        "bottom": 822,
+        "top": 867,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.3333333333333333
+          },
+          {
+            "to": 0.6666666666666666,
+            "color": "yellow"
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1008,
+        "top": 1070,
+        "color": "yellow",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 1144,
+        "top": 1467,
+        "color": "blue"
+      },
+      {
+        "bottom": 1590,
+        "top": 1632,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第35关
+  {
+    "color": "green",
+    "layers": 10,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 161,
+        "top": 217,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.25
+          },
+          {
+            "color": "green",
+            "to": 0.5
+          },
+          {
+            "color": "yellow",
+            "to": 0.75
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 360,
+        "top": 416,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 484,
+        "top": 529,
+        "color": "red",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 598,
+        "top": 655,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 848,
+        "top": 904,
+        "color": "yellow"
+      },
+      {
+        "bottom": 973,
+        "top": 1020,
+        "dynamic": true
+      },
+      {
+        "bottom": 1092,
+        "top": 1148,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.25
+          },
+          {
+            "color": "yellow",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 0.75
+          },
+          {
+            "color": "green",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1236,
+        "top": 1437,
+        "rainbow": true
+      },
+      {
+        "bottom": 1494,
+        "top": 1542,
+        "color": "green"
+      }
+    ]
+  },
+  // 第36关
+  {
+    "color": "blue",
+    "layers": 10,
+    "bands": [
+      {
+        "bottom": 127,
+        "top": 183,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.3333333333333333
+          },
+          {
+            "dynamic": true,
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 291,
+        "top": 344,
+        "color": "blue"
+      },
+      {
+        "bottom": 452,
+        "top": 502,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.5
+          },
+          {
+            "to": 1,
+            "rainbow": true
+          }
+        ]
+      },
+      {
+        "bottom": 630,
+        "top": 686,
+        "segments": [
+          {
+            "to": 0.25,
+            "color": "yellow",
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "color": "yellow",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 0.75
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 781,
+        "top": 829,
+        "color": "red"
+      }
+    ]
+  },
+  // 第37关
+  {
+    "color": "yellow",
+    "layers": 11,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 144,
+        "top": 200,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "yellow",
+            "to": 0.6666666666666666,
+            "morph": true,
+            "target": "blue"
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 294,
+        "top": 356,
+        "color": "blue"
+      },
+      {
+        "bottom": 436,
+        "top": 492,
+        "segments": [
+          {
+            "to": 0.25,
+            "color": "blue",
+            "morph": true,
+            "target": "yellow"
+          },
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 0.75
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "yellow"
+          }
+        ]
+      },
+      {
+        "bottom": 560,
+        "top": 617,
+        "segments": [
+          {
+            "to": 0.5,
+            "color": "yellow",
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "to": 1,
+            "color": "yellow",
+            "morph": true,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 673,
+        "top": 723,
+        "color": "red"
+      }
+    ]
+  },
+  // 第38关
+  {
+    "color": "blue",
+    "layers": 11,
+    "bands": [
+      {
+        "bottom": 141,
+        "top": 197,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "blue",
+            "to": 0.6666666666666666,
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 286,
+        "top": 348,
+        "color": "yellow"
+      },
+      {
+        "bottom": 442,
+        "top": 492,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "dynamic": true,
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 580,
+        "top": 636,
+        "color": "red"
+      },
+      {
+        "bottom": 715,
+        "top": 765,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "rainbow": true
+          },
+          {
+            "color": "blue",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 859,
+        "top": 915,
+        "color": "blue"
+      },
+      {
+        "bottom": 1017.9154014729129,
+        "top": 1074,
+        "segments": [
+          {
+            "to": 0.5,
+            "color": "red",
+            "morph": true,
+            "target": "blue"
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 1177,
+        "top": 1233,
+        "color": "red"
+      }
+    ]
+  },
+  // 第39关
+  {
+    "color": "red",
+    "layers": 11,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 140,
+        "top": 196,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.3333333333333333
+          },
+          {
+            "rainbow": true,
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 310,
+        "top": 372,
+        "color": "blue"
+      },
+      {
+        "bottom": 485,
+        "top": 569,
+        "dynamic": true
+      },
+      {
+        "bottom": 675,
+        "top": 731,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "to": 0.6666666666666666,
+            "color": "blue"
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1023,
+        "top": 1085,
+        "segments": [
+          {
+            "to": 0.5,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 848,
+        "top": 898,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 1204,
+        "top": 1260,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第40关
+  {
+    "color": "blue",
+    "layers": 12,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 147,
+        "top": 220,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "to": 0.6666666666666666,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 322,
+        "top": 507,
+        "color": "red"
+      },
+      {
+        "bottom": 599,
+        "top": 649,
+        "segments": [
+          {
+            "to": 0.5,
+            "color": "red",
+            "morph": true,
+            "target": "blue"
+          },
+          {
+            "to": 1,
+            "color": "red",
+            "morph": true,
+            "target": "green"
+          }
+        ]
+      },
+      {
+        "bottom": 761,
+        "top": 914,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.5
+          },
+          {
+            "color": "green",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1000,
+        "top": 1079,
+        "rainbow": true
+      },
+      {
+        "bottom": 1190,
+        "top": 1305,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.25
+          },
+          {
+            "dynamic": true,
+            "to": 0.5
+          },
+          {
+            "to": 0.75,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "color": "green",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 1389,
+        "top": 1445,
+        "color": "red",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 1520,
+        "top": 1568,
+        "dynamic": true
+      },
+      {
+        "bottom": 1643,
+        "top": 1782,
+        "segments": [
+          {
+            "to": 0.5,
+            "dynamic": true
+          },
+          {
+            "to": 1,
+            "rainbow": true
+          }
+        ]
+      },
+      {
+        "bottom": 1858.652585433606,
+        "top": 1914.652585433606,
+        "color": "yellow"
+      }
+    ]
+  },
+  // 第41关
+  {
+    "color": "blue",
+    "layers": 5,
+    "bands": [
+      {
+        "bottom": 126,
+        "top": 148,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 148,
+        "top": 190,
+        "color": "blue"
+      },
+      {
+        "bottom": 190,
+        "top": 212,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 281,
+        "top": 303,
+        "color": "red",
+        "safe": true
+      },
+      {
+        "bottom": 345,
+        "top": 367,
+        "color": "red",
+        "safe": true
+      },
+      {
+        "bottom": 303,
+        "top": 345,
+        "color": "blue"
+      },
+      {
+        "bottom": 424,
+        "top": 480,
+        "color": "blue",
+        "safe": true
+      }
+    ]
+  },
+  // 第42关
+  {
+    "color": "red",
+    "layers": 7,
+    "bands": [
+      {
+        "bottom": 108,
+        "top": 164,
+        "segments": [
+          {
+            "color": "red",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 328,
+        "top": 376,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 522,
+        "top": 569,
+        "color": "red",
+        "safe": true
+      },
+      {
+        "bottom": 567,
+        "top": 623,
+        "segments": [
+          {
+            "to": 0.5,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 743,
+        "top": 785,
+        "color": "red",
+        "safe": true
+      }
+    ]
+  },
+  // 第43关
+  {
+    "color": "blue",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 126,
+        "top": 196,
+        "segments": [
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "color": "blue",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 288,
+        "top": 358,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第44关
+  {
+    "color": "yellow",
+    "layers": 8,
+    "bands": [
+      {
+        "bottom": 119,
+        "top": 178,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "color": "yellow"
+          },
+          {
+            "to": 0.6666666666666666,
+            "danger": true
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 269,
+        "top": 325,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 431,
+        "top": 484,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.25
+          },
+          {
+            "to": 0.5,
+            "color": "red"
+          },
+          {
+            "to": 0.75,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 588,
+        "top": 647,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "to": 0.6666666666666666,
+            "danger": true
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 798,
+        "top": 854,
+        "color": "blue",
+        "safe": true
+      }
+    ]
+  },
+  // 第45关
+  {
+    "color": "blue",
+    "layers": 9,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 111,
+        "top": 161,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 263,
+        "top": 319,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "color": "blue",
+            "morph": true,
+            "target": "green"
+          },
+          {
+            "to": 0.6666666666666666,
+            "danger": true
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 487,
+        "top": 543,
+        "color": "green",
+        "safe": true
+      },
+      {
+        "bottom": 644,
+        "top": 697,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "danger": true
+          },
+          {
+            "to": 0.6666666666666666,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "color": "red",
+            "morph": true,
+            "target": "yellow"
+          }
+        ]
+      },
+      {
+        "bottom": 806,
+        "top": 865,
+        "segments": [
+          {
+            "to": 0.5,
+            "dynamic": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 1049,
+        "top": 1074,
+        "color": "green",
+        "safe": true
+      },
+      {
+        "bottom": 1073,
+        "top": 1129,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第46关
+  {
+    "color": "blue",
+    "layers": 10,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 123,
+        "top": 178,
+        "dynamic": true
+      },
+      {
+        "bottom": 255,
+        "top": 303,
+        "color": "blue"
+      },
+      {
+        "bottom": 366,
+        "top": 405,
+        "color": "blue",
+        "morph": true,
+        "target": "red"
+      },
+      {
+        "bottom": 473,
+        "top": 497,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 496,
+        "top": 552,
+        "segments": [
+          {
+            "to": 0.5,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 626,
+        "top": 679,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "rainbow": true
+          },
+          {
+            "to": 0.6666666666666666,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 822,
+        "top": 1116,
+        "color": "red"
+      },
+      {
+        "bottom": 1265,
+        "top": 1313,
+        "rainbow": true
+      },
+      {
+        "bottom": 1426,
+        "top": 1488,
+        "segments": [
+          {
+            "to": 0.25,
+            "dynamic": true
+          },
+          {
+            "color": "yellow",
+            "to": 0.5
+          },
+          {
+            "color": "blue",
+            "to": 0.75
+          },
+          {
+            "color": "green",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1583,
+        "top": 1633,
+        "color": "green",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 1721,
+        "top": 1777,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "color": "yellow",
+            "morph": true,
+            "target": "blue"
+          },
+          {
+            "to": 0.6666666666666666,
+            "rainbow": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 1861,
+        "top": 1904,
+        "color": "blue"
+      }
+    ]
+  },
+  // 第47关
+  {
+    "color": "red",
+    "layers": 11,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 104,
+        "top": 159,
+        "color": "red"
+      },
+      {
+        "bottom": 237,
+        "top": 279,
+        "rainbow": true
+      },
+      {
+        "bottom": 378,
+        "top": 430,
+        "segments": [
+          {
+            "to": 0.5,
+            "color": "red",
+            "morph": true,
+            "target": "blue"
+          },
+          {
+            "to": 1,
+            "color": "red",
+            "morph": true,
+            "target": "yellow"
+          }
+        ]
+      },
+      {
+        "bottom": 506,
+        "top": 559,
+        "segments": [
+          {
+            "to": 0.5,
+            "color": "blue",
+            "morph": true,
+            "target": "green"
+          },
+          {
+            "color": "yellow",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 641,
+        "top": 683,
+        "dynamic": true
+      },
+      {
+        "bottom": 783,
+        "top": 1014,
+        "segments": [
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "color": "green",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 1098,
+        "top": 1120,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 1119,
+        "top": 1171,
+        "segments": [
+          {
+            "color": "yellow",
+            "to": 0.25
+          },
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "color": "green",
+            "to": 0.75
+          },
+          {
+            "to": 1,
+            "color": "green",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 1232,
+        "top": 1280,
+        "color": "yellow",
+        "safe": true
+      },
+      {
+        "bottom": 1362,
+        "top": 1404,
+        "segments": [
+          {
+            "danger": true,
+            "to": 0.3333333333333333
+          },
+          {
+            "to": 0.6666666666666666,
+            "dynamic": true,
+            "color": "yellow"
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 1447,
+        "top": 1485,
+        "rainbow": true
+      },
+      {
+        "bottom": 1528,
+        "top": 1590,
+        "color": "red"
+      },
+      {
+        "bottom": 1608,
+        "top": 1658,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.5
+          },
+          {
+            "to": 1,
+            "rainbow": true
+          }
+        ]
+      },
+      {
+        "bottom": 1720,
+        "top": 1776,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第48关
+  {
+    "color": "yellow",
+    "layers": 11,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 80,
+        "top": 102,
+        "color": "green",
+        "safe": true
+      },
+      {
+        "bottom": 100,
+        "top": 142,
+        "color": "yellow"
+      },
+      {
+        "bottom": 241,
+        "top": 297,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "color": "yellow",
+            "morph": true,
+            "target": "red"
+          },
+          {
+            "to": 0.6666666666666666,
+            "dynamic": true
+          },
+          {
+            "to": 1,
+            "color": "yellow",
+            "morph": true,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 379,
+        "top": 661,
+        "color": "yellow"
+      },
+      {
+        "bottom": 726,
+        "top": 765,
+        "segments": [
+          {
+            "to": 0.25,
+            "danger": true
+          },
+          {
+            "to": 0.5,
+            "color": "yellow",
+            "morph": true,
+            "target": "green"
+          },
+          {
+            "to": 0.75,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 812,
+        "top": 882,
+        "rainbow": true
+      },
+      {
+        "bottom": 930,
+        "top": 972,
+        "segments": [
+          {
+            "danger": true,
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "green",
+            "to": 0.6666666666666666
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 1122,
+        "top": 1144,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 1144,
+        "top": 1194,
+        "dynamic": true
+      },
+      {
+        "bottom": 1284,
+        "top": 1332,
+        "segments": [
+          {
+            "color": "green",
+            "to": 0.5
+          },
+          {
+            "to": 1,
+            "color": "green",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 1412,
+        "top": 1826,
+        "color": "red",
+        "morph": true,
+        "target": "blue"
+      },
+      {
+        "bottom": 1972,
+        "top": 2017,
+        "segments": [
+          {
+            "to": 0.25,
+            "danger": true
+          },
+          {
+            "to": 0.5,
+            "color": "blue",
+            "morph": true,
+            "target": "yellow"
+          },
+          {
+            "to": 0.75,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "green"
+          }
+        ]
+      },
+      {
+        "bottom": 2116.8570530406946,
+        "top": 2158.8570530406946,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.3333333333333333
+          },
+          {
+            "to": 0.6666666666666666,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "rainbow": true
+          }
+        ]
+      },
+      {
+        "bottom": 2322,
+        "top": 2364,
+        "color": "green",
+        "safe": true
+      }
+    ]
+  },
+  // 第49关
+  {
+    "color": "green",
+    "layers": 12,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 130,
+        "top": 172,
+        "segments": [
+          {
+            "to": 0.25,
+            "danger": true
+          },
+          {
+            "color": "green",
+            "to": 0.5
+          },
+          {
+            "to": 0.75,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 265,
+        "top": 321,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "danger": true
+          },
+          {
+            "to": 0.6666666666666666,
+            "dynamic": true
+          },
+          {
+            "to": 1,
+            "rainbow": true
+          }
+        ]
+      },
+      {
+        "bottom": 451,
+        "top": 473,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 472,
+        "top": 518,
+        "segments": [
+          {
+            "color": "green",
+            "to": 0.25
+          },
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "to": 0.75,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "color": "green",
+            "morph": true,
+            "target": "blue"
+          }
+        ]
+      },
+      {
+        "bottom": 668,
+        "top": 766,
+        "rainbow": true
+      },
+      {
+        "bottom": 842,
+        "top": 876,
+        "segments": [
+          {
+            "to": 0.25,
+            "danger": true
+          },
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "color": "blue",
+            "to": 0.75
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 933,
+        "top": 1169,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "danger": true
+          },
+          {
+            "color": "blue",
+            "to": 0.6666666666666666
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 1254,
+        "top": 1316,
+        "color": "blue",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 1492,
+        "top": 1537,
+        "color": "yellow",
+        "safe": true
+      },
+      {
+        "bottom": 1640,
+        "top": 1696,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "rainbow": true
+          },
+          {
+            "to": 0.6666666666666666,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "dynamic": true
+          }
+        ]
+      },
+      {
+        "bottom": 1831,
+        "top": 1887,
+        "segments": [
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "rainbow": true
+          }
+        ]
+      },
+      {
+        "bottom": 2002,
+        "top": 2072,
+        "rainbow": true
+      }
+    ]
+  },
+  // 第50关
+  {
+    "color": "blue",
+    "layers": 12,
+    "dynSeq": [
+      "red",
+      "blue",
+      "yellow",
+      "green"
+    ],
+    "dynPeriod": 1.5,
+    "bands": [
+      {
+        "bottom": 99,
+        "top": 147,
+        "segments": [
+          {
+            "to": 0.25,
+            "rainbow": true
+          },
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "to": 0.75,
+            "dynamic": true
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "red"
+          }
+        ]
+      },
+      {
+        "bottom": 220,
+        "top": 261,
+        "segments": [
+          {
+            "danger": true,
+            "to": 0.3333333333333333
+          },
+          {
+            "color": "red",
+            "to": 0.6666666666666666
+          },
+          {
+            "color": "red",
+            "to": 1
+          }
+        ]
+      },
+      {
+        "bottom": 312,
+        "top": 368,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 368,
+        "top": 413,
+        "color": "red",
+        "safe": true
+      },
+      {
+        "bottom": 598,
+        "top": 648,
+        "segments": [
+          {
+            "to": 0.5,
+            "dynamic": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 741,
+        "top": 786,
+        "color": "red",
+        "morph": true,
+        "target": "green"
+      },
+      {
+        "bottom": 842,
+        "top": 887,
+        "color": "red",
+        "morph": true,
+        "target": "yellow"
+      },
+      {
+        "bottom": 952,
+        "top": 994,
+        "rainbow": true
+      },
+      {
+        "bottom": 1056,
+        "top": 1389,
+        "color": "yellow"
+      },
+      {
+        "bottom": 1460,
+        "top": 1508,
+        "segments": [
+          {
+            "to": 0.3333333333333333,
+            "color": "yellow",
+            "morph": true,
+            "target": "blue"
+          },
+          {
+            "to": 0.6666666666666666,
+            "danger": true
+          },
+          {
+            "to": 1,
+            "danger": true
+          }
+        ]
+      },
+      {
+        "bottom": 1566,
+        "top": 1602,
+        "color": "blue",
+        "safe": true
+      },
+      {
+        "bottom": 1666,
+        "top": 1801,
+        "segments": [
+          {
+            "color": "blue",
+            "to": 0.25
+          },
+          {
+            "to": 0.5,
+            "danger": true
+          },
+          {
+            "color": "blue",
+            "to": 0.75
+          },
+          {
+            "to": 1,
+            "color": "blue",
+            "morph": true,
+            "target": "green"
+          }
+        ]
+      },
+      {
+        "bottom": 1892,
+        "top": 2159,
+        "color": "green"
+      },
+      {
+        "bottom": 2255,
+        "top": 2311,
+        "color": "green"
+      },
+      {
+        "bottom": 2376,
+        "top": 2426,
+        "color": "green"
+      },
+      {
+        "bottom": 2489,
+        "top": 2534,
+        "color": "green"
+      },
+      {
+        "bottom": 2591,
+        "top": 2630,
+        "color": "green"
+      },
+      {
+        "bottom": 2856,
+        "top": 2912,
+        "dynamic": true
+      }
+    ]
+  }
+];;;;;;;
+
+
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+let hover = false, hasInteracted = false;
+let levelIndex = 0, stageIndex = 0, jumped = false;
+let rings = [], floorY = 0, floorBand = null, worldTop = 0, cam = 0;
+let ball = { y: R, x: W / 2, color: 'blue' }, v = 0, dragging = false;
+let state = 'idle', chargeT = 0, power = 0, hp = 15;
+let settleFrom = 0, settleTo = 0, settleT = 0;
+let bannerT = 0, bannerText = '';
+let time = 0;
+let sliderOn = false;
+let menuPan = 0, menuDrag = false, menuDragY = 0, menuMoved = false, menuDownY = 0;
+let dropT = 0, hpFlashT = 0, hpFlashVal = 0, dmgShown = false, hpRuleT = 0;
+let safeFlashT = 0;
+let blurCv = null;
+let chargeDots = [];
+let l26HintA = 1, l26Fading = false;
+
+const curLevel = () => LEVELS[levelIndex];
+const curStage = () => (curLevel().stages ? curLevel().stages[stageIndex] : null);
+const isTutorial = () => !!curLevel().stages;
+function healthFor(n) {
+  if ([1, 11, 16, 21, 26, 41, 43].includes(n)) return 5;
+  if (n >= 46) return 10;
+  if (n % 5 === 0) return 5;
+  return 10;
+}
+function levelBg(n) {
+  if ([1, 11, 16, 21, 26, 41, 43].includes(n)) return '#3fbf7d';
+  if (n >= 46) return '#a55fd6';
+  if (n % 5 === 0) return '#e45752';
+  return '#d8b263';
+}
+
+function applyDyn() {
+  const lv = curLevel();
+  rings.forEach(r => {
+    if (r.dynamic) { r.dynSeq = lv.dynSeq || DYN_SEQ; r.dynPeriod = lv.dynPeriod || DYN_PERIOD; }
+    if (r.segments) r.segments.forEach(sg => {
+      if (sg.dynamic) { sg.dynSeq = lv.dynSeq || DYN_SEQ; sg.dynPeriod = lv.dynPeriod || DYN_PERIOD; }
+    });
+  });
+}
+function loadBands(bands) {
+  rings = bands.map(b => ({ bottom: b.bottom, top: b.top, color: b.color || null, dynamic: !!b.dynamic, morph: !!b.morph, target: b.target || null, rainbow: !!b.rainbow, segments: b.segments ? b.segments.map(sg => Object.assign({}, sg)) : null, safe: !!b.safe, danger: !!b.danger, solid: false }));
+}
+const dynColor = b => b.dynSeq[Math.floor(time / b.dynPeriod) % b.dynSeq.length];
+function segAt(band, x) {
+  const f = (x - WALL_L) / (WALL_R - WALL_L);
+  for (const s of band.segments) if (f <= s.to + 1e-9) return s;
+  return band.segments[band.segments.length - 1];
+}
+function segContain(band, x) {
+  let lx = WALL_L;
+  for (const s of band.segments) {
+    const x2 = WALL_L + s.to * (WALL_R - WALL_L);
+    if (x - R >= lx && x + R <= x2) return s;
+    lx = x2;
+  }
+  return null;
+}
+function applySlider(pos) {
+  const leftMax = WALL_L + R, rightMax = WALL_R - R;
+  const t = Math.min(1, Math.max(0, (pos.y - SLIDER.y) / SLIDER.h));
+  ball.x = leftMax + t * (rightMax - leftMax);
+  if (floorBand && floorBand.segments) {
+    const sg = segAt(floorBand, ball.x);
+    if (sg.danger) return;
+    if (sg.dynamic) ball.color = dynColor(sg);
+    else if (!sg.rainbow) ball.color = sg.color;
+  }
+}
+function circleRect(cx, cy, r, rx, ry, rw, rh) {
+  const nx = Math.max(rx, Math.min(cx, rx + rw));
+  const ny = Math.max(ry, Math.min(cy, ry + rh));
+  const dx = cx - nx, dy = cy - ny;
+  return dx * dx + dy * dy <= r * r;
+}
+function touchesDanger() {
+  for (const b of rings) {
+    if (b.solid) continue;
+    if (b.danger && circleRect(ball.x, ball.y, R, WALL_L, b.bottom, WALL_R - WALL_L, b.top - b.bottom)) return true;
+    if (b.segments) {
+      let lx = WALL_L;
+      for (const sg of b.segments) {
+        const x2 = WALL_L + sg.to * (WALL_R - WALL_L);
+        if (sg.danger && circleRect(ball.x, ball.y, R, lx, b.bottom, x2 - lx, b.top - b.bottom)) return true;
+        lx = x2;
+      }
+    }
+  }
+  return false;
+}
+function levelTop() {
+  let m = 0;
+  const lv = curLevel();
+  if (lv.stages) lv.stages.forEach(s => s.bands.forEach(b => { m = Math.max(m, b.top); }));
+  else lv.bands.forEach(b => { m = Math.max(m, b.top); });
+  return m;
+}
+function loadLevel(i) {
+  levelIndex = i; stageIndex = 0; jumped = false;
+  const lv = LEVELS[i];
+  sliderOn = (lv.stages ? lv.stages.some(s => s.bands.some(b => b.segments)) : lv.bands.some(b => b.segments));
+  loadBands(lv.stages ? lv.stages[0].bands : lv.bands);
+  worldTop = levelTop() + 300;
+  floorY = 0; floorBand = null; cam = 0; v = 0; dragging = false;
+  ball = { y: R, x: W / 2, color: lv.color };
+  hp = healthFor(i + 1); power = 0; chargeT = 0;
+  bannerT = 1.4; bannerText = 'LEVEL ' + (i + 1);
+  time = 0;
+  applyDyn();
+  dropT = 0; v = 0; ball.y = R + 320;
+  stopCharge();
+  chargeDots = [];
+  l26HintA = 1; l26Fading = false;
+  state = 'drop';
+}
+function nextStage() {
+  stageIndex++; jumped = false;
+  loadBands(curLevel().stages[stageIndex].bands);
+  floorY = 0; floorBand = null; v = 0; dragging = false;
+  ball.y = R; ball.x = W / 2;
+  bannerT = 0; bannerText = '';
+  time = 0;
+  applyDyn();
+  state = 'idle';
+}
+
+function fit() {
+  const dpr = window.devicePixelRatio || 1;
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H) * 0.96;
+  canvas.style.width = (W * s) + 'px';
+  canvas.style.height = (H * s) + 'px';
+  canvas.width = Math.round(W * s * dpr);
+  canvas.height = Math.round(H * s * dpr);
+  ctx.setTransform(s * dpr, 0, 0, s * dpr, 0, 0);
+}
+
+function ringAt(y) {
+  for (const r of rings) if (!r.solid && y - R >= r.bottom - V_TOL && y + R <= r.top + V_TOL) return r;
+  return null;
+}
+function nextRing() {
+  for (const r of rings) if (!r.solid && !r.danger && r.bottom >= floorY) return r;
+  return null;
+}
+const sy = y => (H - R * 2) - (y - cam);
+
+const SLIDE_Y = 348, SLIDE_H = 160;
+const SLIDER = { x: W - 24, y: SLIDE_Y, w: 8, h: SLIDE_H };
+const SLIDER_HIT = { x: W - 46, y: SLIDE_Y - 10, w: 46, h: SLIDE_H + 20 };
+const PWR = { x: 12, y: SLIDE_Y, w: 8, h: SLIDE_H };
+const HUD_PAUSE = { x: 30, y: 24, r: 16 };
+const PZ_MENU = { x: W / 2 - 90, y: H / 2 - 30, w: 180, h: 44 };
+const PZ_RESUME = { x: W / 2 - 90, y: H / 2 + 26, w: 180, h: 44 };
+const PZ_RESTART = { x: W / 2 - 90, y: H / 2 + 82, w: 180, h: 44 };
+const BTN_A = { x: W / 2 - 130, y: H / 2 + 70, w: 120, h: 44 };
+const BTN_B = { x: W / 2 + 10, y: H / 2 + 70, w: 120, h: 44 };
+const MENU_COLS = 5, MENU_R = 18;
+const menuCircle = i => ({ x: 103 + (i % MENU_COLS) * 46, y: 200 + Math.floor(i / MENU_COLS) * 46 - menuPan, r: MENU_R });
+function clampMenu() {
+  const rows = Math.ceil(LEVELS.length / MENU_COLS);
+  menuPan = Math.min(Math.max(menuPan, 0), Math.max(0, 200 + (rows - 1) * 46 + MENU_R * 2 - (H - 20)));
+}
+const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+function evtPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const p = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+  return { x: (p.clientX - rect.left) / rect.width * W, y: (p.clientY - rect.top) / rect.height * H };
+}
+
+function onDamage() {
+  hpFlashVal = 1; hpFlashT = 0.6;
+  if (levelIndex === 0 && !dmgShown) { dmgShown = true; hpRuleT = 2.6; }
+}
+
+function update(dt) {
+  time += dt;
+  if (bannerT > 0) bannerT -= dt;
+  if (hpFlashT > 0) hpFlashT -= dt;
+  if (safeFlashT > 0) safeFlashT -= dt;
+  if (hpRuleT > 0) hpRuleT -= dt;
+  if (l26Fading && l26HintA > 0) l26HintA = Math.max(0, l26HintA - dt * 0.7);
+  if (state === 'drop') {
+    dropT += dt;
+    v += G * dt;
+    ball.y -= v * dt;
+    if (ball.y <= floorY + R) {
+      ball.y = floorY + R;
+      v = -v * 0.52;
+      if (Math.abs(v) < 45) { v = 0; state = 'idle'; }
+    }
+    if (dropT > 1.6) { ball.y = floorY + R; v = 0; state = 'idle'; }
+  } else if (state === 'charging') {
+    chargeT += dt;
+    power = Math.min(1, chargeT / CHARGE_TIME);
+    setChargePitch(power);
+    for (let i = 0; i < 2; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const rad = R * 2.2 + Math.random() * R * 2.6;
+      chargeDots.push({ x: ball.x + Math.cos(ang) * rad, y: ball.y + Math.sin(ang) * rad, a: 1 });
+    }
+    for (const d of chargeDots) {
+      const dx = ball.x - d.x, dy = ball.y - d.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const spd = 300 * dt;
+      d.x += dx / dist * spd;
+      d.y += dy / dist * spd;
+      d.a -= dt * 2.2;
+    }
+    chargeDots = chargeDots.filter(d => d.a > 0 && (d.x - ball.x) * (d.x - ball.x) + (d.y - ball.y) * (d.y - ball.y) > 9);
+  } else if (state === 'up') {
+    const sdt = dt * Math.max(0.25, Math.min(1, Math.abs(v) / 300));
+    ball.y += v * sdt;
+    v -= G * sdt;
+    if (v <= 0) {
+      const r = ringAt(ball.y);
+      const sg = r && r.segments ? segContain(r, ball.x) : null;
+      const c = r ? (sg ? (sg.dynamic ? dynColor(sg) : sg.color) : (r.dynamic ? dynColor(r) : r.color)) : null;
+      if (r && (r.rainbow || (sg && sg.rainbow) || c === ball.color)) {
+        playHit();
+        if (!r.segments) {
+          r.solid = true;
+          r.color = r.rainbow ? ball.color : c;
+        }
+        if (r.morph) { r.color = r.target; ball.color = r.target; }
+        if (sg && sg.morph) { sg.color = sg.target; sg.morph = false; ball.color = sg.target; }
+        if (sg && sg.rainbow) { sg.rainbow = false; sg.color = ball.color; }
+        if (sg && sg.dynamic) { sg.dynamic = false; sg.color = ball.color; }
+        if (r.segments && sg) {
+          for (const ss of r.segments) {
+            if (ss === sg) continue;
+            if (ss.rainbow) { ss.rainbow = false; ss.color = ball.color; }
+            else if (ss.morph) { ss.morph = false; ss.color = ss.color; }
+            else if (ss.dynamic) { ss.dynamic = false; ss.color = dynColor(ss); }
+          }
+        }
+        floorY = r.top;
+        floorBand = r;
+        if (levelIndex === 25 && !l26Fading) l26Fading = true;
+        settleFrom = ball.y; settleTo = r.top + R; settleT = 0;
+        state = 'settle';
+      } else {
+        const touchedSafe = rings.some(b => b.safe && !b.solid && ball.y + R >= b.bottom && ball.y - R <= b.top);
+        const jumpStage = curStage() && curStage().goal === 'jump';
+        if (touchedSafe) { safeFlashT = 0.8; playSafe(); }
+        else if (!jumpStage) { hp--; onDamage(); playHurt(); }
+        else playMiss();
+        v = 0;
+        state = 'fall';
+      }
+    }
+  } else if (state === 'fall') {
+    const sdt = dt * Math.max(0.25, Math.min(1, Math.abs(v) / 300));
+    v -= G * sdt;
+    ball.y += v * sdt;
+    if (ball.y <= floorY + R) {
+      ball.y = floorY + R; v = 0;
+      const st = curStage();
+      if (st && st.goal === 'jump' && jumped) nextStage();
+      else state = hp <= 0 ? 'over' : 'idle';
+    }
+  } else if (state === 'settle') {
+    settleT += dt;
+    const k = Math.min(1, settleT / 0.22);
+    const e = 1 - Math.pow(1 - k, 3);
+    ball.y = settleFrom + (settleTo - settleFrom) * e;
+    if (k >= 1) {
+      ball.y = settleTo;
+      if (isTutorial()) {
+        if (stageIndex + 1 < curLevel().stages.length) nextStage();
+        else { playWin(); state = 'win'; }
+      } else state = nextRing() ? 'idle' : (playWin(), 'win');
+    }
+  }
+  if (state !== 'over' && state !== 'win' && state !== 'menu' && state !== 'pause' && state !== 'drop' && touchesDanger()) {
+    v = 0;
+    stopCharge();
+    playHurt();
+    state = 'over';
+  }
+  const t = Math.max(floorY + R - H * 0.3, ball.y - H * 0.78);
+  const ct = Math.min(Math.max(t, 0), Math.max(0, worldTop - (H - R * 2)));
+  cam += (ct - cam) * Math.min(1, dt * 6);
+}
+
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawDynSeg(s, lx, x2, y1, y2) {
+  const n = s.dynSeq.length;
+  const idx = Math.floor(time / s.dynPeriod) % n;
+  const frac = (time % s.dynPeriod) / s.dynPeriod;
+  const cx = (lx + x2) / 2, cy = (y1 + y2) / 2;
+  const spacing = 15, ringR = 8;
+  const segW = x2 - lx;
+  const oneW = (n - 1) * spacing + 2 * ringR;
+  const pos = [];
+  if (oneW <= segW - 6) {
+    for (let i = 0; i < n; i++) pos.push([cx + (i - (n - 1) / 2) * spacing, cy]);
+  } else {
+    const r1 = Math.ceil(n / 2), r2 = n - r1;
+    const yA = y1 + (y2 - y1) * 0.3, yB = y1 + (y2 - y1) * 0.72;
+    for (let i = 0; i < r1; i++) pos.push([cx + (i - (r1 - 1) / 2) * spacing, yA]);
+    for (let i = 0; i < r2; i++) pos.push([cx + (i - (r2 - 1) / 2) * spacing, yB]);
+  }
+  for (let i = 0; i < n; i++) {
+    ctx.beginPath();
+    ctx.arc(pos[i][0], pos[i][1], i === idx ? 5.5 : 3.5, 0, Math.PI * 2);
+    ctx.globalAlpha = i === idx ? 1 : 0.35;
+    ctx.fillStyle = PALETTE[s.dynSeq[i]].dark;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  ctx.beginPath();
+  ctx.arc(pos[idx][0], pos[idx][1], ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+  ctx.strokeStyle = PALETTE[s.dynSeq[idx]].dark;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+function drawWarn(x, y) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - 8);
+  ctx.lineTo(x + 8, y + 6);
+  ctx.lineTo(x - 8, y + 6);
+  ctx.closePath();
+  ctx.fillStyle = '#e8b322';
+  ctx.fill();
+  ctx.strokeStyle = '#2a2f38';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#2a2f38';
+  ctx.fillRect(x - 1.2, y - 4, 2.4, 6);
+  ctx.fillRect(x - 1.2, y + 3, 2.4, 2.4);
+}
+
+function drawRing(r) {
+  const y1 = sy(r.top), y2 = sy(r.bottom);
+  if (y2 < -10 || y1 > H + 10) return;
+  const col = r.dynamic && !r.solid ? dynColor(r) : r.color;
+  const x = WALL_L, w = WALL_R - WALL_L, hh = y2 - y1;
+
+  if (r.segments) {
+    const fl = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(time * 6));
+    let px = WALL_L;
+    for (const s of r.segments) {
+      const x2 = WALL_L + s.to * (WALL_R - WALL_L);
+      if (s.danger) ctx.fillStyle = '#565b63';
+      else if (s.rainbow) {
+        const g = ctx.createLinearGradient(px, 0, x2, 0);
+        const ks = Object.keys(PALETTE);
+        ks.forEach((k, j) => g.addColorStop(j / (ks.length - 1), PALETTE[k].light));
+        ctx.fillStyle = g;
+      } else ctx.fillStyle = PALETTE[s.dynamic ? dynColor(s) : s.color].light;
+      ctx.fillRect(px, y1, x2 - px, hh);
+      px = x2;
+    }
+    ctx.strokeStyle = '#8a93a0';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, y1); ctx.lineTo(x + w, y1);
+    ctx.moveTo(x, y2); ctx.lineTo(x + w, y2);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < r.segments.length - 1; i++) {
+      const dx = WALL_L + r.segments[i].to * (WALL_R - WALL_L);
+      ctx.moveTo(dx, y1); ctx.lineTo(dx, y2);
+    }
+    ctx.stroke();
+    let lx = WALL_L;
+    for (const s of r.segments) {
+      const x2 = WALL_L + s.to * (WALL_R - WALL_L);
+      if (s.danger) {
+        drawWarn((lx + x2) / 2, (y1 + y2) / 2);
+        ctx.strokeStyle = 'rgba(220,60,60,' + fl.toFixed(3) + ')';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(lx, y1); ctx.lineTo(x2, y1);
+        ctx.moveTo(lx, y2); ctx.lineTo(x2, y2);
+        ctx.stroke();
+      } else if (s.rainbow) {
+      } else if (s.dynamic) {
+        drawDynSeg(s, lx, x2, y1, y2);
+      } else {
+        const sc = s.color;
+        ctx.beginPath();
+        ctx.arc((lx + x2) / 2, (y1 + y2) / 2, 5.5, 0, Math.PI * 2);
+        ctx.fillStyle = PALETTE[sc].dark;
+        ctx.fill();
+        if (s.morph) {
+          ctx.beginPath();
+          ctx.arc((lx + x2) / 2 + 12, (y1 + y2) / 2, 3.5, 0, Math.PI * 2);
+          ctx.fillStyle = PALETTE[s.target].dark;
+          ctx.fill();
+        }
+      }
+      lx = x2;
+    }
+    return;
+  }
+
+  if (r.danger) {
+    const fl = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(time * 6));
+    ctx.fillStyle = '#565b63';
+    ctx.fillRect(x, y1, w, hh);
+    ctx.strokeStyle = 'rgba(220,60,60,' + fl.toFixed(3) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y1); ctx.lineTo(x + w, y1);
+    ctx.moveTo(x, y2); ctx.lineTo(x + w, y2);
+    ctx.stroke();
+    drawWarn(W / 2, (y1 + y2) / 2);
+    return;
+  }
+
+  if (r.solid) {
+    ctx.fillStyle = PALETTE[col].dark;
+    ctx.fillRect(x, y1, w, hh);
+    ctx.strokeStyle = 'rgba(0,0,0,.25)';
+  } else if (r.rainbow) {
+    const g = ctx.createLinearGradient(x, 0, x + w, 0);
+    const ks = Object.keys(PALETTE);
+    ks.forEach((k, i) => g.addColorStop(i / (ks.length - 1), PALETTE[k].light));
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y1, w, hh);
+    ctx.strokeStyle = '#8a93a0';
+  } else {
+    ctx.fillStyle = PALETTE[col].light;
+    ctx.fillRect(x, y1, w, hh);
+    ctx.strokeStyle = PALETTE[col].dark;
+  }
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash(r.dynamic && !r.solid ? [8, 6] : []);
+  ctx.beginPath();
+  ctx.moveTo(x, y1); ctx.lineTo(x + w, y1);
+  ctx.moveTo(x, y2); ctx.lineTo(x + w, y2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (r.dynamic && !r.solid) {
+    const idx = Math.floor(time / r.dynPeriod) % r.dynSeq.length;
+    for (let i = 0; i < r.dynSeq.length; i++) {
+      ctx.beginPath();
+      ctx.arc(W / 2 + (i - (r.dynSeq.length - 1) / 2) * 26, (y1 + y2) / 2, i === idx ? 7 : 4.5, 0, Math.PI * 2);
+      ctx.globalAlpha = i === idx ? 1 : 0.35;
+      ctx.fillStyle = PALETTE[r.dynSeq[i]].dark;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    const frac = (time % r.dynPeriod) / r.dynPeriod;
+    const ax = W / 2 + (idx - (r.dynSeq.length - 1) / 2) * 26;
+    const ay = (y1 + y2) / 2;
+    ctx.beginPath();
+    ctx.arc(ax, ay, 10.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+    ctx.strokeStyle = PALETTE[r.dynSeq[idx]].dark;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  }
+  if (r.morph && !r.solid) {
+    const cy = (y1 + y2) / 2;
+    ctx.beginPath();
+    ctx.arc(W / 2 - 22, cy, 6, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE[r.color].dark;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 8, cy - 6); ctx.lineTo(W / 2 + 8, cy); ctx.lineTo(W / 2 - 8, cy + 6);
+    ctx.closePath();
+    ctx.fillStyle = '#5b6470';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(W / 2 + 22, cy, 6, 0, Math.PI * 2);
+    ctx.fillStyle = PALETTE[r.target].dark;
+    ctx.fill();
+  }
+  if (r.safe && !r.solid) {
+    const sx = W / 2, sy0 = (y1 + y2) / 2;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy0 - 9);
+    ctx.lineTo(sx + 7, sy0 - 6);
+    ctx.lineTo(sx + 7, sy0);
+    ctx.quadraticCurveTo(sx + 7, sy0 + 6, sx, sy0 + 9);
+    ctx.quadraticCurveTo(sx - 7, sy0 + 6, sx - 7, sy0);
+    ctx.lineTo(sx - 7, sy0 - 6);
+    ctx.closePath();
+    ctx.fillStyle = PALETTE[col].dark;
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(sx - 3, sy0);
+    ctx.lineTo(sx - 1, sy0 + 3);
+    ctx.lineTo(sx + 4, sy0 - 3);
+    ctx.stroke();
+  }
+}
+
+function drawTopFlag() {
+  if (!rings.length) return;
+  let top = null;
+  for (const r of rings) if (!r.danger && (!top || r.top > top.top)) top = r;
+  if (!top) return;
+  const y0 = sy(top.top), y1 = sy(top.bottom);
+  if (y1 < -60 || y0 > H + 60) return;
+  const bandH = y1 - y0;
+  const cell = 8, cols = 2;
+  const stripW = cell * cols;
+  drawCheckerStrips(y0, bandH, cell, cols);
+}
+function drawCheckerStrips(y0, h, cell, cols) {
+  const rows = Math.max(1, Math.ceil(h / cell));
+  const stripW = cell * cols;
+  const draw = (x0) => {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        ctx.fillStyle = (r + c) % 2 === 0 ? '#20242c' : '#ffffff';
+        ctx.fillRect(x0 + c * cell, y0 + r * cell, cell, cell);
+      }
+    }
+  };
+  draw(WALL_L - 8 - stripW);
+  draw(WALL_R + 8);
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#F5ECDB';
+  ctx.fillRect(0, 0, W, H);
+
+  for (const r of rings) drawRing(r);
+  drawTopFlag();
+
+  const g0 = sy(0);
+  const cornerR = 8;
+  ctx.strokeStyle = '#8a94a3';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(WALL_L, -20);
+  ctx.lineTo(WALL_L, g0 - cornerR);
+  ctx.arcTo(WALL_L, g0, WALL_L + cornerR, g0, cornerR);
+  ctx.lineTo(WALL_R - cornerR, g0);
+  ctx.arcTo(WALL_R, g0, WALL_R, g0 - cornerR, cornerR);
+  ctx.lineTo(WALL_R, -20);
+  ctx.stroke();
+
+  if (state === 'charging') {
+    for (const d of chargeDots) {
+      ctx.beginPath();
+      ctx.arc(d.x, sy(d.y), 3, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,' + Math.max(0, d.a).toFixed(3) + ')';
+      ctx.fill();
+    }
+  }
+  const by = sy(ball.y);
+  const squash = state === 'charging' ? power * 0.32 : 0;
+  if (squash > 0.01) {
+    const rx = R * (1 + squash), ry = R * (1 - squash);
+    const cy = by + R - ry;
+    ctx.fillStyle = PALETTE[ball.color].dark;
+    ctx.strokeStyle = 'rgba(0,0,0,.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(ball.x, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = PALETTE[ball.color].dark;
+    ctx.strokeStyle = 'rgba(0,0,0,.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(ball.x, by, R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.45)';
+    ctx.beginPath();
+    ctx.arc(ball.x - 4, by - 5, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // top bar (plain white)
+  const hudH = 48;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, hudH);
+  ctx.fillStyle = 'rgba(0,0,0,.08)';
+  ctx.fillRect(0, hudH, W, 1);
+  // pause button (top-left, circular)
+  ctx.beginPath();
+  ctx.arc(HUD_PAUSE.x, HUD_PAUSE.y, HUD_PAUSE.r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.15)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.strokeStyle = '#5b6470';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(HUD_PAUSE.x - 4, HUD_PAUSE.y - 6); ctx.lineTo(HUD_PAUSE.x - 4, HUD_PAUSE.y + 6);
+  ctx.moveTo(HUD_PAUSE.x + 4, HUD_PAUSE.y - 6); ctx.lineTo(HUD_PAUSE.x + 4, HUD_PAUSE.y + 6);
+  ctx.stroke();
+  // level (center)
+  ctx.fillStyle = '#333';
+  ctx.font = '800 16px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText('LEVEL ' + (levelIndex + 1), W / 2, 25);
+  // health (top-right, bold red, close to heart)
+  let hpScale = 1;
+  if (hpFlashT > 0) hpScale = 1 + 0.25 * (hpFlashT / 0.6);
+  const hpY = 25;
+  ctx.textAlign = 'right';
+  ctx.font = '800 ' + Math.round(16 * hpScale) + 'px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  const hW = ctx.measureText(String(hp)).width;
+  ctx.fillStyle = '#c0392b';
+  ctx.fillText('♥', W - 14 - hW, hpY);
+  ctx.fillText(String(hp), W - 14, hpY);
+  if (hpFlashT > 0 && hpFlashT > 0.35) {
+    ctx.fillStyle = '#e74c3c';
+    ctx.font = '800 15px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillText('-1', W - 14 - hW - 20, hpY - 12);
+  }
+  if (safeFlashT > 0) {
+    const k = safeFlashT / 0.8;              // 1 -> 0, animate over 0.8s
+    const hx = W - 14 - hW;
+    // green glow pulse around the heart
+    ctx.beginPath();
+    ctx.arc(hx - 12, hpY, 8 + 5 * (1 - k), 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(47,163,107,' + (0.45 * k).toFixed(3) + ')';
+    ctx.fill();
+    // light sweep across the top bar (right -> left)
+    const sweepX = W - 34 - (W - 120) * (1 - k);
+    ctx.save();
+    ctx.globalAlpha = 0.55 * k;
+    const g = ctx.createLinearGradient(sweepX - 16, 0, sweepX + 16, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(0.5, 'rgba(255,255,255,.9)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(sweepX - 16, 8, 32, 32);
+    ctx.restore();
+  }
+
+  if (state === 'charging') {
+    const px = PWR.x, py = PWR.y, pw = PWR.w, ph = PWR.h;
+    rr(px, py, pw, ph, 4);
+    ctx.fillStyle = '#e3e6ea';
+    ctx.fill();
+    ctx.strokeStyle = '#9aa1ab';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (power > 0.02) {
+      const fillH = (ph - 4) * power;
+      const g = ctx.createLinearGradient(0, py + ph, 0, py);
+      g.addColorStop(0, '#2fa36b');
+      g.addColorStop(0.5, '#e8b322');
+      g.addColorStop(1, '#d94040');
+      ctx.save();
+      rr(px + 2, py + 2, pw - 4, ph - 4, 3);
+      ctx.clip();
+      ctx.fillStyle = g;
+      ctx.fillRect(px, py + ph - fillH, pw, fillH);
+      ctx.restore();
+    }
+  }
+
+  const st = curStage();
+  if (st) {
+    drawCenterText(st.text, H * 0.5);
+  } else if (levelIndex === 25 && curLevel().hint && l26HintA > 0) {
+    ctx.globalAlpha = l26HintA;
+    drawCenterText(curLevel().hint, H * 0.5);
+    ctx.globalAlpha = 1;
+  }
+  if (hpRuleT > 0) {
+    drawCenterText('血量为0时，本局结束', H * 0.5 + 46);
+  }
+
+  if (sliderOn) {
+    const canSlide = state === 'idle';
+    ctx.globalAlpha = canSlide ? 0.9 : 0.35;
+    rr(SLIDER.x - 2, SLIDER.y, SLIDER.w + 4, SLIDER.h, 6);
+    ctx.fillStyle = 'rgba(0,0,0,.15)';
+    ctx.fill();
+    const leftMax = WALL_L + R, rightMax = WALL_R - R;
+    const t = (ball.x - leftMax) / (rightMax - leftMax);
+    const ky = SLIDER.y + t * SLIDER.h;
+    ctx.beginPath();
+    ctx.arc(SLIDER.x + SLIDER.w / 2, ky, 11, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,.95)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,.3)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  if (bannerT > 0 && state !== 'over' && state !== 'win') {
+    ctx.fillStyle = 'rgba(32,36,44,' + (Math.min(1, bannerT) * 0.85).toFixed(3) + ')';
+    ctx.font = '700 32px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(bannerText, W / 2, H * 0.4);
+  }
+
+  if (state === 'pause') {
+    ctx.fillStyle = 'rgba(20,22,28,.6)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = '700 30px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillText('暂停中', W / 2, H / 2 - 90);
+    drawBtn(PZ_MENU, '选关');
+    drawBtn(PZ_RESUME, '继续');
+    drawBtn(PZ_RESTART, '重来');
+  }
+
+  if (state === 'over' || state === 'win') {
+    const last = levelIndex === LEVELS.length - 1;
+    ctx.fillStyle = 'rgba(20,22,28,.6)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = '700 34px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillText(state === 'win' ? (last ? '全部通关！' : '通关！') : '游戏结束', W / 2, H / 2 - 30);
+    drawBtn(BTN_A, '选关');
+    drawBtn(BTN_B, state === 'win' ? (last ? '回到第1关' : '下一关') : '重试本关');
+  }
+
+  if (state === 'menu') {
+    ctx.fillStyle = '#F5ECDB';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#2a2f38';
+    ctx.font = '700 26px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Reach the Ring', W / 2, 95);
+    ctx.fillStyle = '#7a828d';
+    ctx.font = '14px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.fillText('选择关卡', W / 2, 124);
+    for (let i = 0; i < LEVELS.length; i++) {
+      const c = menuCircle(i);
+      if (c.y < 90 || c.y > H + 40) continue;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+      ctx.fillStyle = levelBg(i + 1);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,.15)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = '700 18px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(i + 1), c.x, c.y + 1);
+      ctx.textBaseline = 'alphabetic';
+    }
+  }
+}
+
+function drawCenterText(text, y) {
+  ctx.font = '600 16px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  const w = ctx.measureText(text).width + 34;
+  ctx.fillStyle = 'rgba(32,36,44,.6)';
+  rr(W / 2 - w / 2, y - 20, w, 40, 11);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, W / 2, y);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawBtn(r, label) {
+  rr(r.x, r.y, r.w, r.h, 10);
+  ctx.fillStyle = 'rgba(255,255,255,.16)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.7)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = '600 16px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function press(e) {
+  if (e.cancelable) e.preventDefault();
+  const pos = evtPos(e);
+  if (state === 'menu') {
+    menuDrag = true; menuDragY = pos.y; menuDownY = pos.y; menuMoved = false;
+    return;
+  }
+  if (state === 'win' || state === 'over') {
+    if (inRect(pos, BTN_A)) { state = 'menu'; return; }
+    if (inRect(pos, BTN_B)) {
+      loadLevel(state === 'win' ? (levelIndex + 1 < LEVELS.length ? levelIndex + 1 : 0) : levelIndex);
+      return;
+    }
+    return;
+  }
+  if (state === 'pause') {
+    if (inRect(pos, PZ_MENU)) { state = 'menu'; return; }
+    if (inRect(pos, PZ_RESUME)) { state = 'idle'; return; }
+    if (inRect(pos, PZ_RESTART)) { loadLevel(levelIndex); return; }
+    return;
+  }
+  { const dx = pos.x - HUD_PAUSE.x, dy = pos.y - HUD_PAUSE.y; if (dx * dx + dy * dy <= HUD_PAUSE.r * HUD_PAUSE.r) { stopCharge(); state = 'pause'; return; } }
+  if (state !== 'idle') return;
+  if (sliderOn && inRect(pos, SLIDER_HIT)) { dragging = true; applySlider(pos); return; }
+  hasInteracted = true;
+  chargeT = 0; power = 0; chargeDots = [];
+  startCharge();
+  state = 'charging';
+}
+function moveH(e) {
+  if (menuDrag) {
+    const pos = evtPos(e);
+    if (!menuMoved && Math.abs(pos.y - menuDownY) > 10) menuMoved = true;
+    if (menuMoved) {
+      menuPan += menuDragY - pos.y;
+      menuDragY = pos.y;
+      clampMenu();
+    }
+    return;
+  }
+  if (!dragging) return;
+  if (e.cancelable) e.preventDefault();
+  applySlider(evtPos(e));
+}
+function release(e) {
+  if (e && e.cancelable) e.preventDefault();
+  if (menuDrag) {
+    menuDrag = false;
+    if (!menuMoved && state === 'menu') {
+      const pos = evtPos(e);
+      for (let i = 0; i < LEVELS.length; i++) {
+        const c = menuCircle(i);
+        const dx = pos.x - c.x, dy = pos.y - c.y;
+        if (dx * dx + dy * dy <= c.r * c.r) { loadLevel(i); return; }
+      }
+    }
+    return;
+  }
+  if (dragging) { dragging = false; return; }
+  if (state !== 'charging') return;
+  const A = MIN_A + (MAX_A - MIN_A) * power;
+  v = Math.sqrt(2 * G * A);
+  const st = curStage();
+  if (st && st.goal === 'jump') jumped = true;
+  chargeDots = [];
+  stopCharge();
+  playLaunch();
+  state = 'up';
+}
+
+canvas.addEventListener('mousedown', press);
+window.addEventListener('mouseup', release);
+canvas.addEventListener('touchstart', press, { passive: false });
+canvas.addEventListener('touchend', release, { passive: false });
+window.addEventListener('mousemove', moveH);
+canvas.addEventListener('touchmove', moveH, { passive: false });
+canvas.addEventListener('mouseenter', () => { hover = true; });
+canvas.addEventListener('mouseleave', () => { hover = false; });
+window.addEventListener('resize', fit);
+
+fit();
+loadLevel(0);
+state = 'menu';
+let last = performance.now();
+function frame(t) {
+  const dt = Math.min(0.033, (t - last) / 1000);
+  last = t;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
